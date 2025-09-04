@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Conversor Universal: Bedrock ↔ Java (client-side)</title>
+  <style>
+    body{font-family:Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding:20px; background:#071022; color:#e6eef8}
+    .card{background:#081528; padding:18px; border-radius:12px; box-shadow:0 8px 30px rgba(2,6,23,0.6); max-width:1100px; margin:0 auto}
+    h1{font-size:22px; margin:0 0 6px}
+    p.lead{color:#9fb0d6; margin-top:6px}
+    .grid{display:grid; gap:12px; grid-template-columns: 1fr 1fr}
+    label.file{display:block; padding:12px; border:1px dashed rgba(255,255,255,0.06); border-radius:10px; cursor:pointer; text-align:center}
+    input[type=file]{display:none}
+    button{background:#06b6d4; border:none; color:#022; padding:10px 14px; border-radius:8px; cursor:pointer}
+    select{background:#0b1220; color:#dff; border-radius:8px; padding:8px}
+    .progress{height:12px; width:100%; background:rgba(255,255,255,0.03); border-radius:8px; overflow:hidden}
+    .bar{height:100%; width:0%; background:linear-gradient(90deg, rgba(6,182,212,0.12), rgba(6,182,212,0.9));}
+    pre{background:#041026; padding:10px; border-radius:8px; max-height:260px; overflow:auto}
+    small.hint{color:#7ea6d0}
+    .controls{display:flex; gap:8px; align-items:center}
+    .footer{margin-top:14px; color:#89b1d6}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Conversor Universal — Client-side</h1>
+    <p class="lead">Suporta: <strong>Reempacotar/Atualizar</strong> (Bedrock→Bedrock, Java→Java) — e modos simulados para Bedrock↔Java (scaffold). A conversão acontece inteiramente no navegador do usuário (sem enviar arquivos ao servidor).</p>
+
+    <div style="display:flex; gap:12px; align-items:center; margin-bottom:8px">
+      <label for="mode">Modo:</label>
+      <select id="mode">
+        <option value="repack-bedrock">Bedrock → Bedrock (reempacotar/atualizar)</option>
+        <option value="repack-java">Java → Java (reempacotar/atualizar)</option>
+        <option value="bedrock-to-java">Bedrock → Java (simulado / scaffold)</option>
+        <option value="java-to-bedrock">Java → Bedrock (simulado / scaffold)</option>
+      </select>
+      <div style="flex:1"></div>
+      <small class="hint">Processamento local; recomendo usar navegadores recentes e fechar abas pesadas.</small>
+    </div>
+
+    <div class="grid">
+      <label class="file">Upload Mundo (Bedrock .mcworld ou .zip)
+        <input id="bedrockInput" type="file" accept=".zip,.mcworld" />
+      </label>
+
+      <label class="file">Upload Mundo (Java .zip) — ou template Java (opcional)
+        <input id="javaInput" type="file" accept=".zip" />
+      </label>
+    </div>
+
+    <div style="margin-top:12px" class="controls">
+      <button id="startBtn">Start</button>
+      <a id="downloadBtn" download style="text-decoration:none"><button id="dlBtn" disabled>Baixar Resultado (.zip)</button></a>
+      <button id="clearBtn">Limpar</button>
+      <div style="flex:1"></div>
+      <small class="hint">Logs aparecem abaixo. Modo 'repack' preserva exatamente a estrutura — útil para recuperar mundos.</small>
+    </div>
+
+    <div style="margin-top:12px">
+      <div class="progress"><div id="bar" class="bar"></div></div>
+      <div style="display:flex; justify-content:space-between; margin-top:6px"><small id="progressText">Aguardando</small><small id="countText">0 / 0</small></div>
+    </div>
+
+    <h3 style="margin-top:14px">Log</h3>
+    <pre id="log">Pronto. Escolha modo, carregue arquivos e clique Start.</pre>
+
+    <div class="footer">
+      <p>Notas técnicas:</p>
+      <ul>
+        <li>Reempacotar = descompactar e compactar novamente (corrige zips corrompidos e atualiza timestamp).</li>
+        <li>Bedrock→Bedrock e Java→Java aqui são <em>reempacotadores reais</em> (funciona com mundos jogáveis).</li>
+        <li>Bedrock↔Java são atualmente <em>simulações/scaffold</em> — preparam a estrutura e mapeiam chunks de forma demonstrativa.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Dependências -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+  <script>
+    const modeSel = document.getElementById('mode');
+    const bedrockInput = document.getElementById('bedrockInput');
+    const javaInput = document.getElementById('javaInput');
+    const startBtn = document.getElementById('startBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const dlBtn = document.getElementById('dlBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const logEl = document.getElementById('log');
+    const bar = document.getElementById('bar');
+    const progressText = document.getElementById('progressText');
+    const countText = document.getElementById('countText');
+
+    let inBedrockZip, inJavaZip, outZip;
+    let totalSteps = 0, doneSteps = 0;
+
+    function log(msg){ logEl.textContent += '
+' + msg; logEl.scrollTop = logEl.scrollHeight; }
+    function resetUI(){ bar.style.width='0%'; progressText.textContent='Aguardando'; countText.textContent='0 / 0'; dlBtn.disabled=true; downloadBtn.removeAttribute('href'); }
+
+    clearBtn.addEventListener('click', ()=>{ bedrockInput.value=''; javaInput.value=''; logEl.textContent='Pronto. Escolha modo, carregue arquivos e clique Start.'; resetUI(); });
+
+    async function readArrayBuffer(file){ return await file.arrayBuffer(); }
+
+    startBtn.addEventListener('click', async ()=>{
+      const mode = modeSel.value;
+      log(`Modo selecionado: ${mode}`);
+      startBtn.disabled = true; resetUI();
+
+      try{
+        if(mode === 'repack-bedrock'){
+          if(!bedrockInput.files[0]){ alert('Envie o mundo Bedrock (.mcworld ou .zip)'); startBtn.disabled=false; return; }
+          progressText.textContent = 'Reempacotando Bedrock...';
+          await repackZip(bedrockInput.files[0], 'mundo-bedrock-repacked.mcworld');
+        } else if(mode === 'repack-java'){
+          if(!javaInput.files[0]){ alert('Envie o mundo Java (.zip)'); startBtn.disabled=false; return; }
+          progressText.textContent = 'Reempacotando Java...';
+          await repackZip(javaInput.files[0], 'mundo-java-repacked.zip');
+        } else if(mode === 'bedrock-to-java'){
+          if(!bedrockInput.files[0]){ alert('Envie o mundo Bedrock (.mcworld ou .zip)'); startBtn.disabled=false; return; }
+          progressText.textContent = 'Simulando Bedrock → Java (scaffold)...';
+          await simulatedBedrockToJava(bedrockInput.files[0]);
+        } else if(mode === 'java-to-bedrock'){
+          if(!javaInput.files[0]){ alert('Envie o mundo Java (.zip)'); startBtn.disabled=false; return; }
+          progressText.textContent = 'Simulando Java → Bedrock (scaffold)...';
+          await simulatedJavaToBedrock(javaInput.files[0]);
+        }
+      }catch(err){ console.error(err); log('Erro: '+(err.message||err)); }
+
+      startBtn.disabled = false;
+    });
+
+    async function repackZip(file, suggestedName){
+      log('Lendo arquivo...');
+      const arr = await readArrayBuffer(file);
+      const zip = await JSZip.loadAsync(arr);
+      log('Arquivo aberto. Recriando pacote...');
+
+      const out = new JSZip();
+      const entries = Object.keys(zip.files);
+      totalSteps = entries.length;
+      doneSteps = 0;
+      countText.textContent = `0 / ${totalSteps}`;
+
+      for(const p of entries){
+        const f = zip.files[p];
+        if(f.dir){ out.folder(p); }
+        else{
+          const content = await f.async('uint8array');
+          out.file(p, content);
+        }
+        doneSteps++;
+        const pct = Math.round((doneSteps/totalSteps)*100);
+        bar.style.width = pct + '%';
+        progressText.textContent = `Reempacotando... (${pct}%)`;
+        countText.textContent = `${doneSteps} / ${totalSteps}`;
+        // pause tiny to keep UI responsive
+        await new Promise(r=>setTimeout(r, 0));
+      }
+
+      log('Empacotamento completo. Gerando blob...');
+      const blob = await out.generateAsync({type:'blob', compression:'DEFLATE', compressionOptions:{level:6}});
+      const url = URL.createObjectURL(blob);
+      downloadBtn.href = url;
+      downloadBtn.download = suggestedName;
+      dlBtn.disabled = false;
+      progressText.textContent = 'Pronto para download.';
+      log(`Pronto — clique em Baixar Resultado (.zip) para salvar (${suggestedName}).`);
+    }
+
+    // Simulações scaffold (muito parecidas com o protótipo original, mas integradas ao menu)
+    async function simulatedBedrockToJava(file){
+      log('Carregando Bedrock (simulado)...');
+      const arr = await readArrayBuffer(file);
+      const bzip = await JSZip.loadAsync(arr);
+      const entries = Object.keys(bzip.files);
+
+      // heurística para encontrar candidatos (igual protótipo)
+      let chunkCandidates = entries.filter(p => p.startsWith('db/') || p.startsWith('region/') || p.match(/chunk/i));
+      if(chunkCandidates.length === 0){ chunkCandidates = entries.filter(p => !bzip.files[p].dir).slice(0,300); }
+
+      totalSteps = chunkCandidates.length;
+      doneSteps = 0;
+      countText.textContent = `0 / ${totalSteps}`;
+
+      const out = new JSZip();
+      // criar estrutura básica Java
+      out.folder('region');
+      out.file('level.dat', new TextEncoder().encode('level.dat placeholder'));
+
+      for(const [i, path] of chunkCandidates.entries()){
+        try{
+          const f = bzip.files[path];
+          if(!f) continue;
+          const data = await f.async('uint8array');
+          const coord = deriveCoordFromPath(path, i);
+          const regionName = `region/r.${coord.rx}.${coord.rz}.mca`;
+          const text = `Converted chunk
+source: ${path}
+size: ${data.length} bytes
+index:${i}`;
+          out.file(regionName, new TextEncoder().encode(text));
+          log(`Sim: ${path} → ${regionName}`);
+        }catch(e){ log('Erro sim: '+e.message); }
+        doneSteps++;
+        const pct = Math.round((doneSteps/totalSteps)*100);
+        bar.style.width = pct + '%';
+        progressText.textContent = `Convertendo (simulado)... (${pct}%)`;
+        countText.textContent = `${doneSteps} / ${totalSteps}`;
+        await new Promise(r=>setTimeout(r, 10));
+      }
+
+      const blob = await out.generateAsync({type:'blob'});
+      const url = URL.createObjectURL(blob);
+      downloadBtn.href = url; downloadBtn.download = 'mundo-java-simulado.zip'; dlBtn.disabled=false; progressText.textContent='Pronto (simulado)';
+      log('Simulação completa — mundo Java (simulado) pronto para download.');
+    }
+
+    async function simulatedJavaToBedrock(file){
+      log('Carregando Java (simulado)...');
+      const arr = await readArrayBuffer(file);
+      const jzip = await JSZip.loadAsync(arr);
+      const entries = Object.keys(jzip.files);
+      const chunkCandidates = entries.filter(p => p.startsWith('region/') || p.match(/\.mca$/i)).slice(0,300);
+
+      totalSteps = chunkCandidates.length || Math.min(entries.length, 200);
+      doneSteps = 0;
+      countText.textContent = `0 / ${totalSteps}`;
+
+      const out = new JSZip();
+      out.folder('db');
+      out.file('level.dat', new TextEncoder().encode('level.dat placeholder (to bedrock)'));
+
+      for(const [i, path] of (chunkCandidates.length?chunkCandidates:entries.slice(0, totalSteps)).entries()){
+        try{
+          const f = jzip.files[path];
+          if(!f) continue;
+          const data = await f.async('uint8array');
+          const key = `db/chunk_${i}`;
+          const text = `Converted region
+source: ${path}
+size:${data.length} bytes
+index:${i}`;
+          out.file(key, new TextEncoder().encode(text));
+          log(`Sim: ${path} → ${key}`);
+        }catch(e){ log('Erro sim: '+e.message); }
+        doneSteps++;
+        const pct = Math.round((doneSteps/totalSteps)*100);
+        bar.style.width = pct + '%';
+        progressText.textContent = `Convertendo (simulado)... (${pct}%)`;
+        countText.textContent = `${doneSteps} / ${totalSteps}`;
+        await new Promise(r=>setTimeout(r, 10));
+      }
+
+      const blob = await out.generateAsync({type:'blob'});
+      const url = URL.createObjectURL(blob);
+      downloadBtn.href = url; downloadBtn.download = 'mundo-bedrock-simulado.mcworld'; dlBtn.disabled=false; progressText.textContent='Pronto (simulado)';
+      log('Simulação completa — mundo Bedrock (simulado) pronto para download.');
+    }
+
+    function deriveCoordFromPath(path, index){
+      let h = 0; for(let i=0;i<path.length;i++){ h = ((h<<5)-h) + path.charCodeAt(i); h |= 0; }
+      const rx = Math.abs((h % 64) - Math.floor(index/64));
+      const rz = Math.abs(((h>>6) % 64) - (index % 64));
+      return {rx, rz};
+    }
+
+  </script>
+</body>
+</html>
